@@ -1,9 +1,12 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Search, Download, ExternalLink, Github, Globe, X, Filter, ChevronRight, Package, ShieldCheck, Star, Settings, RefreshCw } from 'lucide-react';
+import { Search, Download, ExternalLink, Github, Globe, X, Filter, ChevronRight, Package, ShieldCheck, Star, Settings, RefreshCw, LogIn, LogOut, Sparkles } from 'lucide-react';
 import DOMPurify from 'dompurify';
 import { cn } from './lib/utils';
 import { AppData, RepoData } from './types';
+import { auth, db, signInWithGoogle, logOut, handleFirestoreError, OperationType } from './firebase';
+import { onAuthStateChanged } from 'firebase/auth';
+import { doc, onSnapshot, updateDoc } from 'firebase/firestore';
 
 // --- Hooks ---
 function useIntersectionObserver(callback: () => void, deps: any[]) {
@@ -55,13 +58,12 @@ interface AppCardProps {
   key?: React.Key;
   app: AppData;
   onClick: () => void;
-  repoUrl: string;
   isFavorite: boolean;
   toggleFavorite: (id: string) => void;
 }
 
-const AppCard = ({ app, onClick, repoUrl, isFavorite, toggleFavorite }: AppCardProps) => {
-  const baseUrl = repoUrl.replace('/index-v1.json', '');
+const AppCard = ({ app, onClick, isFavorite, toggleFavorite }: AppCardProps) => {
+  const baseUrl = app.repoUrl || 'https://f-droid.org/repo';
   
   const iconUrl = app.icon?.startsWith('http') ? app.icon : `${baseUrl}/icons-320/${app.icon}`;
   const fallbackIconUrl = app.icon?.startsWith('http') ? app.icon : `${baseUrl}/icons/${app.icon}`;
@@ -126,13 +128,12 @@ const AppCard = ({ app, onClick, repoUrl, isFavorite, toggleFavorite }: AppCardP
 interface AppDetailsProps {
   app: AppData;
   onClose: () => void;
-  repoUrl: string;
   isFavorite: boolean;
   toggleFavorite: (id: string) => void;
 }
 
-const AppDetails = ({ app, onClose, repoUrl, isFavorite, toggleFavorite }: AppDetailsProps) => {
-  const baseUrl = repoUrl.replace('/index-v1.json', '');
+const AppDetails = ({ app, onClose, isFavorite, toggleFavorite }: AppDetailsProps) => {
+  const baseUrl = app.repoUrl || 'https://f-droid.org/repo';
   const downloadUrl = `${baseUrl}/${app.apkName}`;
   
   const iconUrl = app.icon?.startsWith('http') ? app.icon : `${baseUrl}/icons-320/${app.icon}`;
@@ -340,21 +341,61 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedApp, setSelectedApp] = useState<AppData | null>(null);
   const [activeTab, setActiveTab] = useState('For You');
-  const [currentRepo, setCurrentRepo] = useState('https://f-droid.org/repo/index-v1.json');
-  const [favorites, setFavorites] = useLocalStorage<string[]>('foss-hub-favorites', []);
+  
+  // Firebase Auth State
+  const [user, setUser] = useState<any>(null);
+  const [isAuthReady, setIsAuthReady] = useState(false);
+
+  // User Data State
+  const [favorites, setFavorites] = useState<string[]>([]);
+  const [selectedRepos, setSelectedRepos] = useState<string[]>(['https://f-droid.org/repo/index-v1.json']);
+  
   const [page, setPage] = useState(1);
   const ITEMS_PER_PAGE = 40;
 
   const [showRepoModal, setShowRepoModal] = useState(false);
   const [customRepoUrl, setCustomRepoUrl] = useState('');
-  const [repos, setRepos] = useLocalStorage('foss-hub-repos', [
-    { name: 'F-Droid Official', url: 'https://f-droid.org/repo/index-v1.json' },
-    { name: 'IzzyOnDroid', url: 'https://apt.izzysoft.de/fdroid/repo/index-v1.json' },
-  ]);
+  
+  // AI Recommendations State
+  const [recommendations, setRecommendations] = useState<string[]>([]);
+  const [loadingRecommendations, setLoadingRecommendations] = useState(false);
 
+  // Auth Listener
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+      setIsAuthReady(true);
+      if (!currentUser) {
+        // Reset to defaults if logged out
+        setFavorites([]);
+        setSelectedRepos(['https://f-droid.org/repo/index-v1.json']);
+      }
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // Firestore Data Listener
+  useEffect(() => {
+    if (isAuthReady && user) {
+      const userRef = doc(db, 'users', user.uid);
+      const unsubscribe = onSnapshot(userRef, (docSnap) => {
+        if (docSnap.exists()) {
+          const data = docSnap.data();
+          setFavorites(data.favorites || []);
+          setSelectedRepos(data.selectedRepos && data.selectedRepos.length > 0 ? data.selectedRepos : ['https://f-droid.org/repo/index-v1.json']);
+        }
+      }, (error) => {
+        handleFirestoreError(error, OperationType.GET, `users/${user.uid}`);
+      });
+      return () => unsubscribe();
+    }
+  }, [isAuthReady, user]);
+
+  // Fetch Repositories
   useEffect(() => {
     setLoading(true);
-    fetch(`/api/repo?url=${encodeURIComponent(currentRepo)}`)
+    const urlsParam = selectedRepos.join(',');
+    fetch(`/api/repo?urls=${encodeURIComponent(urlsParam)}`)
       .then(res => res.json())
       .then(data => {
         setRepoData(data);
@@ -364,27 +405,95 @@ export default function App() {
         console.error(err);
         setLoading(false);
       });
-  }, [currentRepo]);
+  }, [selectedRepos]);
+
+  // Fetch AI Recommendations
+  useEffect(() => {
+    if (repoData && favorites.length > 0 && activeTab === 'For You') {
+      setLoadingRecommendations(true);
+      fetch('/api/recommend', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ favorites, allApps: repoData.apps })
+      })
+      .then(res => res.json())
+      .then(data => {
+        if (data.recommendations) {
+          setRecommendations(data.recommendations);
+        }
+        setLoadingRecommendations(false);
+      })
+      .catch(err => {
+        console.error("Failed to fetch recommendations", err);
+        setLoadingRecommendations(false);
+      });
+    }
+  }, [favorites, repoData, activeTab]);
 
   // Reset pagination when filters change
   useEffect(() => {
     setPage(1);
-  }, [searchQuery, activeTab, currentRepo]);
+  }, [searchQuery, activeTab, selectedRepos]);
 
-  const toggleFavorite = (id: string) => {
-    setFavorites(prev => 
-      prev.includes(id) ? prev.filter(f => f !== id) : [...prev, id]
-    );
+  const toggleFavorite = async (id: string) => {
+    if (!user) {
+      alert("Please sign in to save favorites.");
+      return;
+    }
+    const newFavorites = favorites.includes(id) 
+      ? favorites.filter(f => f !== id) 
+      : [...favorites, id];
+    
+    setFavorites(newFavorites); // Optimistic update
+    
+    try {
+      const userRef = doc(db, 'users', user.uid);
+      await updateDoc(userRef, { favorites: newFavorites });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `users/${user.uid}`);
+    }
   };
 
-  const handleAddCustomRepo = (e: React.FormEvent) => {
+  const handleAddCustomRepo = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!customRepoUrl) return;
-    const newRepo = { name: new URL(customRepoUrl).hostname, url: customRepoUrl };
-    setRepos([...repos, newRepo]);
-    setCurrentRepo(customRepoUrl);
+    
+    const newRepos = [...selectedRepos, customRepoUrl];
+    
+    if (user) {
+      try {
+        const userRef = doc(db, 'users', user.uid);
+        await updateDoc(userRef, { selectedRepos: newRepos });
+      } catch (error) {
+        handleFirestoreError(error, OperationType.UPDATE, `users/${user.uid}`);
+      }
+    } else {
+      setSelectedRepos(newRepos);
+    }
+    
     setCustomRepoUrl('');
     setShowRepoModal(false);
+  };
+
+  const toggleRepoSelection = async (url: string) => {
+    let newRepos;
+    if (selectedRepos.includes(url)) {
+      if (selectedRepos.length === 1) return; // Prevent deselecting all
+      newRepos = selectedRepos.filter(r => r !== url);
+    } else {
+      newRepos = [...selectedRepos, url];
+    }
+
+    if (user) {
+      try {
+        const userRef = doc(db, 'users', user.uid);
+        await updateDoc(userRef, { selectedRepos: newRepos });
+      } catch (error) {
+        handleFirestoreError(error, OperationType.UPDATE, `users/${user.uid}`);
+      }
+    } else {
+      setSelectedRepos(newRepos);
+    }
   };
 
   const categories = useMemo(() => {
@@ -400,7 +509,18 @@ export default function App() {
 
   const filteredApps = useMemo(() => {
     if (!repoData) return [];
-    return repoData.apps.filter(app => {
+    
+    let baseApps = repoData.apps;
+
+    // Apply AI Recommendations for "For You" tab if available
+    if (activeTab === 'For You' && recommendations.length > 0 && !searchQuery) {
+      const recommendedApps = recommendations.map(id => baseApps.find(a => a.id === id)).filter(Boolean) as AppData[];
+      // Combine recommendations with some random apps or recent apps
+      const otherApps = baseApps.filter(a => !recommendations.includes(a.id)).slice(0, 20);
+      baseApps = [...recommendedApps, ...otherApps];
+    }
+
+    return baseApps.filter(app => {
       const name = app.name || '';
       const summary = app.summary || '';
       const query = searchQuery.toLowerCase();
@@ -417,7 +537,7 @@ export default function App() {
       
       return matchesSearch && matchesTab;
     });
-  }, [repoData, searchQuery, activeTab, favorites]);
+  }, [repoData, searchQuery, activeTab, favorites, recommendations]);
 
   const displayedApps = useMemo(() => {
     return filteredApps.slice(0, page * ITEMS_PER_PAGE);
@@ -442,7 +562,7 @@ export default function App() {
         <div className="flex items-center justify-between mb-8">
           <div>
             <h1 className="text-4xl font-display font-medium text-on-surface mb-2">
-              {getGreeting()}, Parth
+              {getGreeting()}{user ? `, ${user.displayName?.split(' ')[0]}` : ''}
             </h1>
             <p className="text-on-surface-variant text-lg">
               Explore {repoData?.apps.length || 'thousands of'} open source apps
@@ -455,9 +575,15 @@ export default function App() {
             >
               <Settings size={24} />
             </button>
-            <div className="w-14 h-14 rounded-full bg-primary-container text-on-primary-container flex items-center justify-center text-xl font-display font-medium shadow-sm">
-              P
-            </div>
+            {user ? (
+              <button onClick={logOut} className="w-14 h-14 rounded-full bg-surface-container-high text-on-surface flex items-center justify-center hover:bg-surface-container-highest transition-colors overflow-hidden">
+                {user.photoURL ? <img src={user.photoURL} alt="Profile" className="w-full h-full object-cover" /> : <LogOut size={24} />}
+              </button>
+            ) : (
+              <button onClick={signInWithGoogle} className="w-14 h-14 rounded-full bg-primary text-on-primary flex items-center justify-center hover:opacity-90 transition-opacity shadow-lg shadow-primary/20">
+                <LogIn size={24} />
+              </button>
+            )}
           </div>
         </div>
         
@@ -519,12 +645,17 @@ export default function App() {
               className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4"
             >
               <AnimatePresence mode="popLayout">
+                {activeTab === 'For You' && loadingRecommendations && (
+                  <div className="col-span-full flex items-center gap-2 text-primary mb-4 p-4 bg-primary/10 rounded-2xl">
+                    <Sparkles className="animate-pulse" size={20} />
+                    <span className="font-medium">AI is curating your recommendations...</span>
+                  </div>
+                )}
                 {displayedApps.map(app => (
                   <AppCard 
                     key={app.id} 
                     app={app} 
                     onClick={() => setSelectedApp(app)} 
-                    repoUrl={currentRepo}
                     isFavorite={favorites.includes(app.id)}
                     toggleFavorite={toggleFavorite}
                   />
@@ -558,7 +689,6 @@ export default function App() {
           <AppDetails 
             app={selectedApp} 
             onClose={() => setSelectedApp(null)} 
-            repoUrl={currentRepo}
             isFavorite={favorites.includes(selectedApp.id)}
             toggleFavorite={toggleFavorite}
           />
@@ -585,23 +715,35 @@ export default function App() {
               <h3 className="text-2xl font-display font-medium text-on-surface mb-6">Repositories</h3>
               
               <div className="space-y-2 mb-6 max-h-64 overflow-y-auto custom-scrollbar pr-2">
-                {repos.map(repo => (
+                {[
+                  { name: 'F-Droid Official', url: 'https://f-droid.org/repo/index-v1.json' },
+                  { name: 'IzzyOnDroid', url: 'https://apt.izzysoft.de/fdroid/repo/index-v1.json' },
+                  // Add custom repos here if needed, or fetch from a global list
+                ].map(repo => (
                   <button
                     key={repo.url}
-                    onClick={() => {
-                      setCurrentRepo(repo.url);
-                      setShowRepoModal(false);
-                    }}
+                    onClick={() => toggleRepoSelection(repo.url)}
                     className={cn(
                       "w-full text-left px-4 py-4 rounded-[16px] transition-all flex items-center justify-between",
-                      currentRepo === repo.url 
+                      selectedRepos.includes(repo.url)
                         ? "bg-primary-container text-on-primary-container font-medium" 
                         : "bg-surface-container hover:bg-surface-container-high text-on-surface"
                     )}
                   >
                     {repo.name}
-                    {currentRepo === repo.url && <div className="w-2 h-2 bg-primary rounded-full" />}
+                    {selectedRepos.includes(repo.url) && <div className="w-2 h-2 bg-primary rounded-full" />}
                   </button>
+                ))}
+                {/* Display custom selected repos that aren't in the default list */}
+                {selectedRepos.filter(url => !['https://f-droid.org/repo/index-v1.json', 'https://apt.izzysoft.de/fdroid/repo/index-v1.json'].includes(url)).map(url => (
+                   <button
+                   key={url}
+                   onClick={() => toggleRepoSelection(url)}
+                   className="w-full text-left px-4 py-4 rounded-[16px] transition-all flex items-center justify-between bg-primary-container text-on-primary-container font-medium"
+                 >
+                   {new URL(url).hostname}
+                   <div className="w-2 h-2 bg-primary rounded-full" />
+                 </button>
                 ))}
               </div>
 

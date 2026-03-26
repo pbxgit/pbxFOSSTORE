@@ -24,6 +24,7 @@ export interface AppData {
   openCollective?: string;
   screenshots?: string[];
   video?: string;
+  repoUrl?: string;
 }
 
 export interface RepoData {
