@@ -357,7 +357,7 @@ export default function App() {
   const [customRepoUrl, setCustomRepoUrl] = useState('');
   
   // AI Recommendations State
-  const [recommendations, setRecommendations] = useState<string[]>([]);
+  const [recommendations, setRecommendations] = useState<{ title: string, apps: string[] }[]>([]);
   const [loadingRecommendations, setLoadingRecommendations] = useState(false);
 
   // Auth Listener
@@ -409,7 +409,7 @@ export default function App() {
 
   // Fetch AI Recommendations
   useEffect(() => {
-    if (repoData && favorites.length > 0 && activeTab === 'For You') {
+    if (repoData && activeTab === 'For You') {
       setLoadingRecommendations(true);
       fetch('/api/recommend', {
         method: 'POST',
@@ -513,11 +513,20 @@ export default function App() {
     let baseApps = repoData.apps;
 
     // Apply AI Recommendations for "For You" tab if available
-    if (activeTab === 'For You' && recommendations.length > 0 && !searchQuery) {
-      const recommendedApps = recommendations.map(id => baseApps.find(a => a.id === id)).filter(Boolean) as AppData[];
-      // Combine recommendations with some random apps or recent apps
-      const otherApps = baseApps.filter(a => !recommendations.includes(a.id)).slice(0, 20);
-      baseApps = [...recommendedApps, ...otherApps];
+    // We handle the display of categorized recommendations separately in the render
+    if (activeTab === 'For You' && !searchQuery) {
+      const recommendedIds = recommendations.length > 0 ? recommendations.flatMap(r => r.apps) : [];
+      
+      // For the main grid, we want to show a diverse mix of apps
+      // Let's prioritize apps with icons, screenshots, and good descriptions
+      const interestingApps = baseApps
+        .filter(a => !recommendedIds.includes(a.id))
+        .filter(a => a.icon && a.summary && a.summary.length > 20)
+        // Sort randomly to keep it fresh
+        .sort(() => Math.random() - 0.5)
+        .slice(0, 60);
+        
+      baseApps = interestingApps;
     }
 
     return baseApps.filter(app => {
@@ -641,27 +650,86 @@ export default function App() {
               ))}
             </div>
           ) : (
-            <motion.div 
-              className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4"
-            >
-              <AnimatePresence mode="popLayout">
-                {activeTab === 'For You' && loadingRecommendations && (
-                  <div className="col-span-full flex items-center gap-2 text-primary mb-4 p-4 bg-primary/10 rounded-2xl">
-                    <Sparkles className="animate-pulse" size={20} />
-                    <span className="font-medium">AI is curating your recommendations...</span>
-                  </div>
-                )}
-                {displayedApps.map(app => (
-                  <AppCard 
-                    key={app.id} 
-                    app={app} 
-                    onClick={() => setSelectedApp(app)} 
-                    isFavorite={favorites.includes(app.id)}
-                    toggleFavorite={toggleFavorite}
-                  />
-                ))}
-              </AnimatePresence>
-            </motion.div>
+            <div className="space-y-12">
+              {activeTab === 'For You' && loadingRecommendations && (
+                <div className="flex items-center gap-2 text-primary mb-4 p-4 bg-primary/10 rounded-2xl">
+                  <Sparkles className="animate-pulse" size={20} />
+                  <span className="font-medium">AI is curating your recommendations...</span>
+                </div>
+              )}
+
+              {activeTab === 'For You' && !searchQuery && recommendations.length > 0 && (
+                <div className="space-y-12 mb-12">
+                  {recommendations.map((category, idx) => {
+                    const categoryApps = category.apps
+                      .map(id => repoData?.apps.find(a => a.id === id))
+                      .filter(Boolean) as AppData[];
+                    
+                    if (categoryApps.length === 0) return null;
+
+                    return (
+                      <section key={idx}>
+                        <h2 className="text-2xl font-display font-medium text-on-surface mb-6 flex items-center gap-2">
+                          <Sparkles className="text-primary" size={24} />
+                          {category.title}
+                        </h2>
+                        <div className="flex overflow-x-auto gap-4 pb-6 snap-x snap-mandatory no-scrollbar -mx-6 px-6">
+                          {categoryApps.map(app => (
+                            <div key={app.id} className="snap-start shrink-0 w-[280px] sm:w-[320px]">
+                              <AppCard 
+                                app={app} 
+                                onClick={() => setSelectedApp(app)} 
+                                isFavorite={favorites.includes(app.id)}
+                                toggleFavorite={toggleFavorite}
+                              />
+                            </div>
+                          ))}
+                        </div>
+                      </section>
+                    );
+                  })}
+                </div>
+              )}
+
+              {(!recommendations.length || activeTab !== 'For You' || searchQuery) ? (
+                <motion.div 
+                  className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4"
+                >
+                  <AnimatePresence mode="popLayout">
+                    {displayedApps.map(app => (
+                      <AppCard 
+                        key={app.id} 
+                        app={app} 
+                        onClick={() => setSelectedApp(app)} 
+                        isFavorite={favorites.includes(app.id)}
+                        toggleFavorite={toggleFavorite}
+                      />
+                    ))}
+                  </AnimatePresence>
+                </motion.div>
+              ) : (
+                <section>
+                  <h2 className="text-2xl font-display font-medium text-on-surface mb-6">
+                    More Apps to Explore
+                  </h2>
+                  <motion.div 
+                    className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4"
+                  >
+                    <AnimatePresence mode="popLayout">
+                      {displayedApps.map(app => (
+                        <AppCard 
+                          key={app.id} 
+                          app={app} 
+                          onClick={() => setSelectedApp(app)} 
+                          isFavorite={favorites.includes(app.id)}
+                          toggleFavorite={toggleFavorite}
+                        />
+                      ))}
+                    </AnimatePresence>
+                  </motion.div>
+                </section>
+              )}
+            </div>
           )}
 
           {!loading && displayedApps.length === 0 && (

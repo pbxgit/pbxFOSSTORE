@@ -8,7 +8,8 @@ async function startServer() {
   const app = express();
   const PORT = 3000;
 
-  app.use(express.json());
+  app.use(express.json({ limit: '50mb' }));
+  app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
   // Cache for repository data
   let repoCache: Record<string, any> = {};
@@ -153,10 +154,6 @@ async function startServer() {
         return res.status(500).json({ error: 'Gemini API Key not configured' });
       }
 
-      if (!favorites || favorites.length === 0) {
-        return res.json({ recommendations: [] });
-      }
-
       const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
       
       // We only send a subset of app info to save tokens
@@ -168,10 +165,13 @@ async function startServer() {
       }));
 
       const prompt = `
-        You are an expert app recommender. 
-        The user has favorited the following apps: ${favorites.join(', ')}.
-        Based on these favorites, recommend 10 to 15 apps from the provided catalog that the user might like.
-        Return ONLY a JSON array of the recommended app IDs (package names).
+        You are an expert app recommender and curator. 
+        The user has favorited the following apps: ${favorites && favorites.length > 0 ? favorites.join(', ') : 'None yet'}.
+        Based on these favorites (if any) and the provided catalog, curate 3 to 5 interesting categories of apps.
+        For example, if they have favorites, you could include a "Because you liked X" category.
+        Other categories could be "Hidden Gems", "Productivity Boosters", "Trending", "Privacy Focused", "Open Source Essentials", etc.
+        For each category, recommend 4 to 8 apps from the provided catalog.
+        Return ONLY a JSON array of objects, where each object has a "title" (the category name) and an "apps" array (containing the recommended app IDs / package names).
         
         Catalog:
         ${JSON.stringify(appCatalog)}
@@ -185,14 +185,22 @@ async function startServer() {
           responseSchema: {
             type: Type.ARRAY,
             items: {
-              type: Type.STRING
+              type: Type.OBJECT,
+              properties: {
+                title: { type: Type.STRING },
+                apps: { 
+                  type: Type.ARRAY,
+                  items: { type: Type.STRING }
+                }
+              },
+              required: ["title", "apps"]
             }
           }
         }
       });
 
-      const recommendedIds = JSON.parse(response.text || '[]');
-      res.json({ recommendations: recommendedIds });
+      const categorizedRecommendations = JSON.parse(response.text || '[]');
+      res.json({ recommendations: categorizedRecommendations });
     } catch (error) {
       console.error('AI Recommendation Error:', error);
       res.status(500).json({ error: 'Failed to generate recommendations' });
