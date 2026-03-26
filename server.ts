@@ -2,7 +2,6 @@ import express from 'express';
 import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import axios from 'axios';
-import { GoogleGenAI, Type } from '@google/genai';
 
 async function startServer() {
   const app = express();
@@ -35,73 +34,108 @@ async function startServer() {
             repoData = repoCache[repoUrl];
           } else {
             const response = await axios.get(repoUrl, { timeout: 15000 });
+            const data = response.data;
             
-            // Process and simplify the data
-            const apps = (response.data.apps || []).map((app: any) => {
-              // Find the latest package for this app to get the APK name
-              const appPackages = response.data.packages ? response.data.packages[app.packageName] || [] : [];
-              const latestPackage = appPackages[0]; // Usually the first one is the latest in v1 index
-              const apkName = latestPackage ? latestPackage.apkName : '';
+            let apps: any[] = [];
+            
+            // Handle index-v2.json (apps is a map)
+            if (data.apps && !Array.isArray(data.apps)) {
+              apps = Object.entries(data.apps).map(([packageName, app]: [string, any]) => {
+                // In v2, icon might be an object { name: "..." }
+                let icon = app.icon;
+                if (icon && typeof icon === 'object' && icon.name) {
+                  icon = icon.name;
+                }
 
-              let name = app.name;
-              let summary = app.summary;
-              let description = app.description;
-              let icon = app.icon;
-              let screenshots: string[] = [];
-              let video = '';
+                // In v2, screenshots might be in a different place or format
+                // For simplicity, we'll try to extract what we can
+                return {
+                  id: packageName,
+                  name: app.name?.['en-US'] || Object.values(app.name || {})[0] || packageName,
+                  summary: app.summary?.['en-US'] || Object.values(app.summary || {})[0] || '',
+                  description: app.description?.['en-US'] || Object.values(app.description || {})[0] || '',
+                  icon: icon,
+                  categories: app.categories || [],
+                  added: app.added,
+                  lastUpdated: app.lastUpdated,
+                  versionName: app.versionName,
+                  packageName: packageName,
+                  apkName: '', // v2 handles packages differently
+                  authorName: app.authorName,
+                  license: app.license,
+                  webSite: app.webSite,
+                  sourceCode: app.sourceCode,
+                  issueTracker: app.issueTracker,
+                  screenshots: [], // v2 screenshots are more complex
+                  repoUrl: repoUrl.replace(/\/index-v\d\.json$/, '')
+                };
+              });
+            } 
+            // Handle index-v1.json (apps is an array)
+            else {
+              apps = (data.apps || []).map((app: any) => {
+                const appPackages = data.packages ? data.packages[app.packageName] || [] : [];
+                const latestPackage = appPackages[0];
+                const apkName = latestPackage ? latestPackage.apkName : '';
 
-              if (app.localized) {
-                const loc = app.localized['en-US'] || Object.values(app.localized)[0] as any;
-                if (loc) {
-                  name = loc.name || name;
-                  summary = loc.summary || summary;
-                  description = loc.description || description;
-                  icon = loc.icon || icon;
-                  if (loc.phoneScreenshots) {
-                    screenshots = loc.phoneScreenshots.map((s: string) => `${app.packageName}/en-US/phoneScreenshots/${s}`);
-                  } else if (loc.sevenInchScreenshots) {
-                    screenshots = loc.sevenInchScreenshots.map((s: string) => `${app.packageName}/en-US/sevenInchScreenshots/${s}`);
-                  }
-                  if (loc.video) {
-                    video = loc.video;
+                let name = app.name;
+                let summary = app.summary;
+                let description = app.description;
+                let icon = app.icon;
+                let screenshots: string[] = [];
+                let video = '';
+
+                if (app.localized) {
+                  const loc = app.localized['en-US'] || Object.values(app.localized)[0] as any;
+                  if (loc) {
+                    name = loc.name || name;
+                    summary = loc.summary || summary;
+                    description = loc.description || description;
+                    icon = loc.icon || icon;
+                    if (loc.phoneScreenshots) {
+                      screenshots = loc.phoneScreenshots.map((s: string) => `${app.packageName}/en-US/phoneScreenshots/${s}`);
+                    } else if (loc.sevenInchScreenshots) {
+                      screenshots = loc.sevenInchScreenshots.map((s: string) => `${app.packageName}/en-US/sevenInchScreenshots/${s}`);
+                    }
+                    if (loc.video) {
+                      video = loc.video;
+                    }
                   }
                 }
-              }
 
-              name = name || app.packageName;
-
-              return {
-                id: app.packageName,
-                name: name,
-                summary: summary,
-                description: description,
-                icon: icon,
-                categories: app.categories || [],
-                added: app.added,
-                lastUpdated: app.lastUpdated,
-                versionName: app.versionName,
-                packageName: app.packageName,
-                apkName: apkName,
-                authorName: app.authorName,
-                license: app.license,
-                webSite: app.webSite,
-                sourceCode: app.sourceCode,
-                issueTracker: app.issueTracker,
-                changelog: app.changelog,
-                donate: app.donate,
-                bitcoin: app.bitcoin,
-                litecoin: app.litecoin,
-                flattrID: app.flattrID,
-                liberapayID: app.liberapayID,
-                openCollective: app.openCollective,
-                screenshots: screenshots,
-                video: video,
-                repoUrl: repoUrl.replace('/index-v1.json', '')
-              };
-            });
+                return {
+                  id: app.packageName,
+                  name: name || app.packageName,
+                  summary: summary,
+                  description: description,
+                  icon: icon,
+                  categories: app.categories || [],
+                  added: app.added,
+                  lastUpdated: app.lastUpdated,
+                  versionName: app.versionName,
+                  packageName: app.packageName,
+                  apkName: apkName,
+                  authorName: app.authorName,
+                  license: app.license,
+                  webSite: app.webSite,
+                  sourceCode: app.sourceCode,
+                  issueTracker: app.issueTracker,
+                  changelog: app.changelog,
+                  donate: app.donate,
+                  bitcoin: app.bitcoin,
+                  litecoin: app.litecoin,
+                  flattrID: app.flattrID,
+                  liberapayID: app.liberapayID,
+                  openCollective: app.openCollective,
+                  screenshots: screenshots,
+                  video: video,
+                  repoUrl: repoUrl.replace(/\/index-v\d\.json$/, '')
+                };
+              });
+            }
 
             repoData = {
-              repo: response.data.repo || { name: 'Unknown Repo', description: '' },
+              repo: data.repo || { name: 'Unknown Repo', description: '' },
               apps: apps,
             };
             repoCache[repoUrl] = repoData;
@@ -142,68 +176,6 @@ async function startServer() {
     } catch (error) {
       console.error('Error fetching repo:', error);
       res.status(500).json({ error: 'Failed to fetch repository data' });
-    }
-  });
-
-  // AI Recommendations Endpoint
-  app.post('/api/recommend', async (req, res) => {
-    try {
-      const { favorites, allApps } = req.body;
-      
-      if (!process.env.GEMINI_API_KEY) {
-        return res.status(500).json({ error: 'Gemini API Key not configured' });
-      }
-
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-      
-      // We only send a subset of app info to save tokens
-      const appCatalog = allApps.map((a: any) => ({ 
-        id: a.packageName, 
-        name: a.name, 
-        summary: a.summary,
-        categories: a.categories
-      }));
-
-      const prompt = `
-        You are an expert app recommender and curator. 
-        The user has favorited the following apps: ${favorites && favorites.length > 0 ? favorites.join(', ') : 'None yet'}.
-        Based on these favorites (if any) and the provided catalog, curate 3 to 5 interesting categories of apps.
-        For example, if they have favorites, you could include a "Because you liked X" category.
-        Other categories could be "Hidden Gems", "Productivity Boosters", "Trending", "Privacy Focused", "Open Source Essentials", etc.
-        For each category, recommend 4 to 8 apps from the provided catalog.
-        Return ONLY a JSON array of objects, where each object has a "title" (the category name) and an "apps" array (containing the recommended app IDs / package names).
-        
-        Catalog:
-        ${JSON.stringify(appCatalog)}
-      `;
-
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.1-flash-lite-preview',
-        contents: prompt,
-        config: {
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                title: { type: Type.STRING },
-                apps: { 
-                  type: Type.ARRAY,
-                  items: { type: Type.STRING }
-                }
-              },
-              required: ["title", "apps"]
-            }
-          }
-        }
-      });
-
-      const categorizedRecommendations = JSON.parse(response.text || '[]');
-      res.json({ recommendations: categorizedRecommendations });
-    } catch (error) {
-      console.error('AI Recommendation Error:', error);
-      res.status(500).json({ error: 'Failed to generate recommendations' });
     }
   });
 
