@@ -89,6 +89,7 @@ const SmartImage = ({ src, fallbacks, alt, className, imgClassName, ...props }: 
           src={currentSrc}
           alt={alt}
           referrerPolicy="no-referrer"
+          loading="lazy"
           className={cn(
             "w-full h-full object-contain transition-opacity duration-300",
             isLoaded ? "opacity-100" : "opacity-0",
@@ -134,30 +135,39 @@ const AppCard = ({ app, onClick, isFavorite, toggleFavorite }: AppCardProps) => 
     
     // Ensure baseUrl is HTTPS and ends with /repo for standard F-Droid repos
     let cleanBaseUrl = baseUrl.replace('http://', 'https://');
+    
+    // Handle F-Droid specific structure
     if (cleanBaseUrl.includes('f-droid.org') && !cleanBaseUrl.endsWith('/repo')) {
       cleanBaseUrl = cleanBaseUrl.replace(/\/$/, '') + '/repo';
     }
 
     const filename = app.icon.includes('/') ? app.icon.split('/').pop() : app.icon;
-    const basePaths = [
-      `${cleanBaseUrl}/icons-640/${filename}`,
-      `${cleanBaseUrl}/icons-320/${filename}`,
-      `${cleanBaseUrl}/icons-240/${filename}`,
-      `${cleanBaseUrl}/icons-160/${filename}`,
-      `${cleanBaseUrl}/icons-120/${filename}`,
-      `${cleanBaseUrl}/icons-192/${filename}`,
-      `${cleanBaseUrl}/icons-144/${filename}`,
-      `${cleanBaseUrl}/icons-96/${filename}`,
-      `${cleanBaseUrl}/icons-72/${filename}`,
-      `${cleanBaseUrl}/icons-48/${filename}`,
-      `${cleanBaseUrl}/icons/${filename}`,
-      `${cleanBaseUrl}/${filename}`
-    ];
+    const sizes = ["icons-640", "icons-320", "icons-240", "icons-160", "icons-120", "icons-192", "icons-144", "icons-96", "icons-72", "icons-48", "icons"];
     
+    const basePaths = sizes.map(size => `${cleanBaseUrl}/${size}/${filename}`);
+    basePaths.push(`${cleanBaseUrl}/${filename}`);
+    
+    // If the icon is a path, try it directly too
     if (app.icon.includes('/')) {
-      return [`${cleanBaseUrl}/${app.icon}`, ...basePaths];
+      const relativePath = app.icon.startsWith('/') ? app.icon.substring(1) : app.icon;
+      basePaths.unshift(`${cleanBaseUrl}/${relativePath}`);
+      
+      // Also try swapping the density folder in the path if it exists
+      sizes.forEach(size => {
+        const swappedPath = app.icon.replace(/icons(-\d+)?/, size);
+        basePaths.push(`${cleanBaseUrl}/${swappedPath}`);
+      });
     }
-    return basePaths;
+    
+    // Also try without /repo if it's a custom repo that might not follow the structure
+    const altBaseUrl = cleanBaseUrl.replace(/\/repo$/, '');
+    if (altBaseUrl !== cleanBaseUrl) {
+      basePaths.push(`${altBaseUrl}/icons-640/${filename}`);
+      basePaths.push(`${altBaseUrl}/icons/${filename}`);
+    }
+
+    // Deduplicate and encode
+    return Array.from(new Set(basePaths)).map(url => encodeURI(url));
   }, [app.icon, baseUrl]);
       
   const dicebearUrl = `https://api.dicebear.com/7.x/initials/svg?seed=${app.name}&backgroundColor=181818&textColor=ffffff`;
@@ -218,6 +228,175 @@ interface AppDetailsProps {
   toggleFavorite: (id: string) => void;
 }
 
+const DownloadButton = ({ url, filename, className }: { url: string, filename: string, className?: string }) => {
+  const [progress, setProgress] = useState<number | null>(null);
+  const [isDownloading, setIsDownloading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleDownload = async () => {
+    if (isDownloading) return;
+    
+    setIsDownloading(true);
+    setProgress(0);
+    setError(null);
+
+    try {
+      const proxyUrl = `/api/download?url=${encodeURIComponent(url)}`;
+      const response = await fetch(proxyUrl);
+      
+      if (!response.ok) throw new Error('Download failed');
+      
+      const contentLength = response.headers.get('content-length');
+      const total = contentLength ? parseInt(contentLength, 10) : 0;
+      let loaded = 0;
+
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error('ReadableStream not supported');
+
+      const chunks = [];
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        loaded += value.length;
+        if (total) setProgress(Math.round((loaded / total) * 100));
+      }
+
+      const blob = new Blob(chunks, { type: 'application/vnd.android.package-archive' });
+      const blobUrl = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = blobUrl;
+      a.download = filename || 'app.apk';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(blobUrl);
+      
+      setProgress(null);
+    } catch (err) {
+      console.error('Download error:', err);
+      setError('Failed to download');
+    } finally {
+      setIsDownloading(false);
+    }
+  };
+
+  return (
+    <div className="flex flex-col gap-2 w-full sm:w-auto">
+      <button 
+        onClick={handleDownload}
+        disabled={isDownloading}
+        className={cn(
+          "px-6 py-3 bg-primary text-on-primary rounded-xl font-medium flex items-center justify-center gap-2 transition-all shadow-lg shadow-primary/20",
+          isDownloading ? "opacity-70 cursor-wait" : "hover:opacity-90 active:scale-95",
+          className
+        )}
+      >
+        {isDownloading ? (
+          <RefreshCw size={20} className="animate-spin" />
+        ) : (
+          <Download size={20} />
+        )}
+        <span className="text-base">{isDownloading ? `Downloading ${progress}%` : 'Install'}</span>
+      </button>
+      
+      {isDownloading && progress !== null && (
+        <div className="w-full bg-surface-container-highest h-1.5 rounded-full overflow-hidden">
+          <motion.div 
+            initial={{ width: 0 }}
+            animate={{ width: `${progress}%` }}
+            className="bg-primary h-full"
+          />
+        </div>
+      )}
+      
+      {error && <span className="text-[10px] text-error text-center font-medium">{error}</span>}
+    </div>
+  );
+};
+
+const AIStructuredDescription = ({ text, appName }: { text: string, appName: string }) => {
+  const [structured, setStructured] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const structureDescription = async () => {
+    setLoading(true);
+    try {
+      const apiKey = process.env.GEMINI_API_KEY;
+      if (!apiKey) throw new Error("API Key missing");
+
+      const ai = new GoogleGenAI({ apiKey });
+      const prompt = `
+        You are a technical writer. Reformat the following app description for "${appName}" into a structured, easy-to-read format using Markdown.
+        Use sections like "Overview", "Key Features", "Permissions", and "Technical Details" where appropriate.
+        Use bullet points for lists. Keep the tone professional and helpful.
+        If the original text is already structured, just clean it up.
+        
+        Original Description:
+        ${text}
+      `;
+
+      const response = await ai.models.generateContent({
+        model: 'gemini-3.1-flash-lite-preview',
+        contents: prompt,
+      });
+
+      setStructured(response.text || text);
+    } catch (err) {
+      console.error("Failed to structure description", err);
+      setStructured(text);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Automatically structure if it's a single long paragraph
+  useEffect(() => {
+    const isClunky = text.length > 300 && !text.includes('\n') && !text.includes('<p>') && !text.includes('<li>');
+    if (isClunky) {
+      structureDescription();
+    }
+  }, [text]);
+
+  if (loading) {
+    return (
+      <div className="space-y-3 animate-pulse">
+        <div className="h-4 bg-surface-container-highest rounded w-3/4" />
+        <div className="h-4 bg-surface-container-highest rounded w-full" />
+        <div className="h-4 bg-surface-container-highest rounded w-5/6" />
+        <div className="h-4 bg-surface-container-highest rounded w-2/3" />
+      </div>
+    );
+  }
+
+  const content = structured || text;
+  const isHtml = content.includes('<') && content.includes('>');
+
+  return (
+    <div className="relative group">
+      {!structured && (
+        <button 
+          onClick={structureDescription}
+          className="absolute -top-10 right-0 flex items-center gap-1.5 text-[10px] font-medium text-primary bg-primary/10 px-2 py-1 rounded-md hover:bg-primary/20 transition-colors"
+        >
+          <Sparkles size={12} /> Structure with AI
+        </button>
+      )}
+      
+      {isHtml ? (
+        <div 
+          className="text-on-surface-variant leading-relaxed prose prose-base max-w-none prose-p:text-on-surface-variant prose-headings:text-on-surface prose-strong:text-on-surface prose-a:text-primary hover:prose-a:underline prose-li:text-on-surface-variant"
+          dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(content) }}
+        />
+      ) : (
+        <div className="text-on-surface-variant leading-relaxed whitespace-pre-wrap text-base prose prose-base max-w-none prose-p:text-on-surface-variant prose-headings:text-on-surface prose-strong:text-on-surface prose-a:text-primary prose-li:text-on-surface-variant">
+          {content}
+        </div>
+      )}
+    </div>
+  );
+};
+
 const AppDetails = ({ app, onClose, isFavorite, toggleFavorite }: AppDetailsProps) => {
   const baseUrl = app.repoUrl || 'https://f-droid.org/repo';
   const downloadUrl = `${baseUrl}/${app.apkName}`;
@@ -228,30 +407,39 @@ const AppDetails = ({ app, onClose, isFavorite, toggleFavorite }: AppDetailsProp
     
     // Ensure baseUrl is HTTPS and ends with /repo for standard F-Droid repos
     let cleanBaseUrl = baseUrl.replace('http://', 'https://');
+    
+    // Handle F-Droid specific structure
     if (cleanBaseUrl.includes('f-droid.org') && !cleanBaseUrl.endsWith('/repo')) {
       cleanBaseUrl = cleanBaseUrl.replace(/\/$/, '') + '/repo';
     }
 
     const filename = app.icon.includes('/') ? app.icon.split('/').pop() : app.icon;
-    const basePaths = [
-      `${cleanBaseUrl}/icons-640/${filename}`,
-      `${cleanBaseUrl}/icons-320/${filename}`,
-      `${cleanBaseUrl}/icons-240/${filename}`,
-      `${cleanBaseUrl}/icons-160/${filename}`,
-      `${cleanBaseUrl}/icons-120/${filename}`,
-      `${cleanBaseUrl}/icons-192/${filename}`,
-      `${cleanBaseUrl}/icons-144/${filename}`,
-      `${cleanBaseUrl}/icons-96/${filename}`,
-      `${cleanBaseUrl}/icons-72/${filename}`,
-      `${cleanBaseUrl}/icons-48/${filename}`,
-      `${cleanBaseUrl}/icons/${filename}`,
-      `${cleanBaseUrl}/${filename}`
-    ];
+    const sizes = ["icons-640", "icons-320", "icons-240", "icons-160", "icons-120", "icons-192", "icons-144", "icons-96", "icons-72", "icons-48", "icons"];
     
+    const basePaths = sizes.map(size => `${cleanBaseUrl}/${size}/${filename}`);
+    basePaths.push(`${cleanBaseUrl}/${filename}`);
+    
+    // If the icon is a path, try it directly too
     if (app.icon.includes('/')) {
-      return [`${cleanBaseUrl}/${app.icon}`, ...basePaths];
+      const relativePath = app.icon.startsWith('/') ? app.icon.substring(1) : app.icon;
+      basePaths.unshift(`${cleanBaseUrl}/${relativePath}`);
+      
+      // Also try swapping the density folder in the path if it exists
+      sizes.forEach(size => {
+        const swappedPath = app.icon.replace(/icons(-\d+)?/, size);
+        basePaths.push(`${cleanBaseUrl}/${swappedPath}`);
+      });
     }
-    return basePaths;
+    
+    // Also try without /repo if it's a custom repo that might not follow the structure
+    const altBaseUrl = cleanBaseUrl.replace(/\/repo$/, '');
+    if (altBaseUrl !== cleanBaseUrl) {
+      basePaths.push(`${altBaseUrl}/icons-640/${filename}`);
+      basePaths.push(`${altBaseUrl}/icons/${filename}`);
+    }
+
+    // Deduplicate and encode
+    return Array.from(new Set(basePaths)).map(url => encodeURI(url));
   }, [app.icon, baseUrl]);
       
   const dicebearUrl = `https://api.dicebear.com/7.x/initials/svg?seed=${app.name}&backgroundColor=cae6ff&textColor=001e30`;
@@ -321,22 +509,14 @@ const AppDetails = ({ app, onClose, isFavorite, toggleFavorite }: AppDetailsProp
                 <p className="text-lg text-primary font-medium">{app.authorName || 'Unknown Developer'}</p>
               </div>
 
-              <div className="flex gap-2 pb-1 w-full sm:w-auto">
+              <div className="flex gap-2 pb-1 w-full sm:w-auto items-end">
                 <button 
                   onClick={() => toggleFavorite(app.id)} 
-                  className="p-3 bg-secondary-container text-on-secondary-container rounded-xl hover:opacity-90 transition-opacity flex items-center justify-center"
+                  className="p-3 h-[52px] w-[52px] bg-secondary-container text-on-secondary-container rounded-xl hover:opacity-90 transition-opacity flex items-center justify-center"
                 >
                   <Star size={20} className={cn(isFavorite && "fill-on-secondary-container")} />
                 </button>
-                <a 
-                  href={downloadUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="flex-1 sm:flex-none px-6 py-3 bg-primary text-on-primary rounded-xl font-medium flex items-center justify-center gap-2 hover:opacity-90 transition-opacity shadow-lg shadow-primary/20"
-                >
-                  <Download size={20} />
-                  <span className="text-base">Install</span>
-                </a>
+                <DownloadButton url={downloadUrl} filename={app.apkName} />
               </div>
             </div>
             
@@ -395,15 +575,10 @@ const AppDetails = ({ app, onClose, isFavorite, toggleFavorite }: AppDetailsProp
 
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
               <div className="lg:col-span-2">
-                <h3 className="text-xl font-display font-medium text-on-surface mb-3">About this app</h3>
-                {app.description ? (
-                  <div 
-                    className="text-on-surface-variant leading-relaxed prose prose-base max-w-none prose-p:text-on-surface-variant prose-headings:text-on-surface prose-strong:text-on-surface prose-a:text-primary hover:prose-a:underline prose-li:text-on-surface-variant"
-                    dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(app.description) }}
-                  />
-                ) : (
-                  <p className="text-on-surface-variant leading-relaxed whitespace-pre-wrap text-base">{app.summary}</p>
-                )}
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="text-xl font-display font-medium text-on-surface">About this app</h3>
+                </div>
+                <AIStructuredDescription text={app.description || app.summary} appName={app.name} />
               </div>
 
               <div className="space-y-5">

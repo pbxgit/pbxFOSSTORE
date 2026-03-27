@@ -41,14 +41,31 @@ async function startServer() {
             // Handle index-v2.json (apps is a map)
             if (data.apps && !Array.isArray(data.apps)) {
               apps = Object.entries(data.apps).map(([packageName, app]: [string, any]) => {
-                // In v2, icon might be an object { name: "..." }
+                // In v2, icon is often a locale map: { "en-US": "icon.png" }
                 let icon = app.icon;
-                if (icon && typeof icon === 'object' && icon.name) {
-                  icon = icon.name;
+                if (icon && typeof icon === 'object') {
+                  icon = icon['en-US'] || Object.values(icon)[0];
                 }
 
-                // In v2, screenshots might be in a different place or format
-                // For simplicity, we'll try to extract what we can
+                // Get the latest version from packages
+                const appPackages = data.packages ? data.packages[packageName] || {} : {};
+                const packageVersions = Object.values(appPackages);
+                const latestPackage: any = packageVersions.length > 0 ? packageVersions[0] : null;
+                const apkName = latestPackage ? latestPackage.file?.name || '' : '';
+                const versionName = latestPackage ? latestPackage.versionName : '';
+
+                // Screenshots in v2 are in metadata or localized
+                let screenshots: string[] = [];
+                if (app.screenshots) {
+                  const locScreens = app.screenshots['en-US'] || Object.values(app.screenshots)[0] as any;
+                  if (locScreens) {
+                    // v2 screenshots are objects with name, etc.
+                    screenshots = Object.values(locScreens).flatMap((cat: any) => 
+                      Array.isArray(cat) ? cat.map(s => s.name || s) : []
+                    );
+                  }
+                }
+
                 return {
                   id: packageName,
                   name: app.name?.['en-US'] || Object.values(app.name || {})[0] || packageName,
@@ -58,15 +75,15 @@ async function startServer() {
                   categories: app.categories || [],
                   added: app.added,
                   lastUpdated: app.lastUpdated,
-                  versionName: app.versionName,
+                  versionName: versionName || app.versionName,
                   packageName: packageName,
-                  apkName: '', // v2 handles packages differently
+                  apkName: apkName,
                   authorName: app.authorName,
                   license: app.license,
                   webSite: app.webSite,
                   sourceCode: app.sourceCode,
                   issueTracker: app.issueTracker,
-                  screenshots: [], // v2 screenshots are more complex
+                  screenshots: screenshots,
                   repoUrl: repoUrl.replace(/\/index-v\d\.json$/, '')
                 };
               });
@@ -176,6 +193,34 @@ async function startServer() {
     } catch (error) {
       console.error('Error fetching repo:', error);
       res.status(500).json({ error: 'Failed to fetch repository data' });
+    }
+  });
+
+  // API Route to proxy downloads for progress tracking and CORS bypass
+  app.get('/api/download', async (req, res) => {
+    const url = req.query.url as string;
+    if (!url) return res.status(400).json({ error: 'URL is required' });
+
+    try {
+      const response = await axios({
+        method: 'get',
+        url: url,
+        responseType: 'stream',
+        timeout: 60000, // Longer timeout for large APKs
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        }
+      });
+
+      // Forward headers
+      if (response.headers['content-type']) res.setHeader('Content-Type', response.headers['content-type']);
+      if (response.headers['content-length']) res.setHeader('Content-Length', response.headers['content-length']);
+      res.setHeader('Content-Disposition', `attachment; filename="${path.basename(new URL(url).pathname)}"`);
+
+      response.data.pipe(res);
+    } catch (error) {
+      console.error('Download proxy error:', error);
+      res.status(500).json({ error: 'Failed to proxy download' });
     }
   });
 
